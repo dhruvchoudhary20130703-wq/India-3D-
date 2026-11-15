@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Mausam 3D Engine</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      background: transparent;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <script>
+    (function () {
+      var fallbackSent = false;
+      function notifyFallback(reason) {
+        if (fallbackSent) return;
+        fallbackSent = true;
+        if (window.AndroidBridge && typeof window.AndroidBridge.onSceneFallback === 'function') {
+          window.AndroidBridge.onSceneFallback(String(reason || 'WebGL unavailable'));
+        }
+      }
+
+      function notifyReady() {
+        if (window.AndroidBridge && typeof window.AndroidBridge.onSceneReady === 'function') {
+          window.AndroidBridge.onSceneReady();
+        }
+      }
+
+      window.__pendingWeatherState = {
+        condition: 'CLEAR',
+        biome: 'THAR_DESERT',
+        isDay: true,
+        windSpeedKmh: 12,
+        windDirectionDeg: 240,
+        cloudCoverPercent: 20,
+        tempCelsius: 34,
+        cityName: 'Jodhpur'
+      };
+
+      window.updateWeatherState = function (state) {
+        if (!state) return;
+        window.__pendingWeatherState = state;
+        if (typeof window.__applyWeatherToThreeScene === 'function') {
+          window.__applyWeatherToThreeScene(state);
+        }
+      };
+
+      function loadScript(src, onLoad, onError) {
+        var s = document.createElement('script');
+        s.src = src;
+        s.async = true;
+        s.onload = onLoad;
+        s.onerror = onError;
+        document.head.appendChild(s);
+      }
+
+      function bootThreeScene() {
+        if (typeof THREE === 'undefined') {
+          notifyFallback('Three.js failed to load');
+          return;
+        }
+
+        var container = document.getElementById('canvas-container');
+        var width = Math.max(container.clientWidth, 300);
+        var height = Math.max(container.clientHeight, 220);
+
+        var renderer;
+        try {
+          renderer = new THREE.WebGLRenderer({
+            antialias: true,
+            alpha: true,
+            powerPreference: 'high-performance'
+          });
+        } catch (err) {
+          notifyFallback(err && err.message ? err.message : 'WebGL init error');
+          return;
+        }
+
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(width, height);
+        renderer.setClearColor(0x000000, 0);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.08;
+        container.appendChild(renderer.domElement);
+
+        var scene = new THREE.Scene();
+        var fog = new THREE.FogExp2(0x163868, 0.022);
+        scene.fog = fog;
+
+        var camera = new THREE.PerspectiveCamera(44, width / height, 0.1, 160);
+        var camDistance = 14.5;
+        var targetYaw = 0.42;
+        var targetPitch = 0.34;
+        var currentYaw = targetYaw;
+        var currentPitch = targetPitch;
+
+        // Lighting
+        var hemiLight = new THREE.HemisphereLight(0x9bd6ff, 0x3b2a1a, 1.1);
+        scene.add(hemiLight);
+
+        var dirLight = new THREE.DirectionalLight(0xfff1d0, 1.85);
+        dirLight.position.set(7, 11, 6);
+        scene.add(dirLight);
+
+        var rimLight = new THREE.DirectionalLight(0x38bdf8, 0.55);
+        rimLight.position.set(-8, 5, -7);
+        scene.add(rimLight);
+
+        var lightningLight = new THREE.PointLight(0xdbeafe, 0, 40, 1.4);
+        lightningLight.position.set(0, 5.5, 0);
+        scene.add(lightningLight);
+
+        // Procedural Textures
+        function createRadialTexture(stops) {
+          var canvas = document.createElement('canvas');
+          canvas.width = 128;
+          canvas.height = 128;
+          var ctx = canvas.getContext('2d');
+          var grad = ctx.createRadialGradient(64, 64, 2, 64, 64, 64);
+          for (var i = 0; i < stops.length; i++) {
+            grad.addColorStop(stops[i][0], stops[i][1]);
+          }
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, 0, 128, 128);
+          var tex = new THREE.CanvasTexture(canvas);
+          tex.needsUpdate = true;
+          return tex;
+        }
+
+        var cloudTexture = createRadialTexture([
+          [0.0, 'rgba(255,255,255,0.92)'],
+          [0.42, 'rgba(235,244,255,0.68)'],
+          [0.75, 'rgba(200,220,245,0.22)'],
+          [1.0, 'rgba(200,220,245,0.0)']
+        ]);
+
+        var sunGlowTexture = createRadialTexture([
+          [0.0, 'rgba(255,250,210,1.0)'],
+          [0.25, 'rgba(255,195,90,0.75)'],
+          [0.6, 'rgba(255,140,40,0.22)'],
+          [1.0, 'rgba(255,120,20,0.0)']
+        ]);
+
+        var moonGlowTexture = createRadialTexture([
+          [0.0, 'rgba(245,250,255,0.95)'],
+          [0.3, 'rgba(165,210,255,0.45)'],
+          [1.0, 'rgba(120,180,255,0.0)']
+        ]);
+
+        var softDotTexture = createRadialTexture([
+          [0.0, 'rgba(255,255,255,1.0)'],
+          [0.45, 'rgba(230,245,255,0.65)'],
+          [1.0, 'rgba(255,255,255,0.0)']
+        ]);
+
+        // 1. 3D Biome Terrain Platform
+        var terrainSegs = 56;
+        var terrainSize = 18;
+        var terrainGeo = new THREE.PlaneGeometry(terrainSize, terrainSize, terrainSegs, terrainSegs);
+        terrainGeo.rotateX(-Math.PI / 2);
+
+        var posAttr = terrainGeo.attributes.position;
+        var vertexCount = posAttr.count;
+        var baseXZ = new Float32Array(vertexCount * 2);
+        var colorArray = new Float32Array(vertexCount * 3);
+        for (var i = 0; i < vertexCount; i++) {
+          baseXZ[i * 2] = posAttr.getX(i);
+          baseXZ[i * 2 + 1] = posAttr.getZ(i);
+        }
+        terrainGeo.setAttribute('color', new THREE.BufferAttribute(colorArray, 3));
+
+        var terrainMat = new THREE.MeshStandardMaterial({
+          vertexColors: true,
+          roughness: 0.78,
+          metalness: 0.08,
+          flatShading: false
+        });
+        var terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
+        terrainMesh.position.y = -2.35;
+        scene.add(terrainMesh);
+
+        // Subtle glowing horizon ring framing the 3D biome island
+        var ringGeo = new THREE.RingGeometry(9.2, 9.36, 72);
+        ringGeo.rotateX(-Math.PI / 2);
+        var ringMat = new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.22,
+          side: THREE.DoubleSide
+        });
+        var horizonRing = new THREE.Mesh(ringGeo, ringMat);
+        horizonRing.position.y = -2.32;
+        scene.add(horizonRing);
+
+        // 2. Celestial Bodies (Sun & Moon)
+        var celestialGroup = new THREE.Group();
+        scene.add(celestialGroup);
+
+        var sunCore = new THREE.Mesh(
+          new THREE.SphereGeometry(0.95, 32, 32),
+          new THREE.MeshBasicMaterial({ color: 0xffd166 })
+        );
+        var sunHalo1 = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: sunGlowTexture,
+            color: 0xffb347,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+          })
+        );
+        sunHalo1.scale.set(5.2, 5.2, 1);
+
+        var sunHalo2 = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: sunGlowTexture,
+            color: 0xff7b29,
+            transparent: true,
+            opacity: 0.55,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+          })
+        );
+        sunHalo2.scale.set(8.5, 8.5, 1);
+
+        var sunGroup = new THREE.Group();
+        sunGroup.add(sunCore);
+        sunGroup.add(sunHalo1);
+        sunGroup.add(sunHalo2);
+        sunGroup.position.set(3.4, 3.6, -3.2);
+        celestialGroup.add(sunGroup);
+
+        var moonCore = new THREE.Mesh(
+          new THREE.SphereGeometry(0.76, 32, 32),
+          new THREE.MeshStandardMaterial({
+            color: 0xe2e8f0,
+            emissive: 0x475569,
+            emissiveIntensity: 0.45,
+            roughness: 0.85
+          })
+        );
+        var moonHalo = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: moonGlowTexture,
+            color: 0x93c5fd,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+          })
+        );
+        moonHalo.scale.set(4.5, 4.5, 1);
+        var moonGroup = new THREE.Group();
+        moonGroup.add(moonCore);
+        moonGroup.add(moonHalo);
+        moonGroup.position.set(-3.2, 3.8, -3.4);
+        celestialGroup.add(moonGroup);
+
+        // 3. 3D Starfield (night)
+        var starCount = 520;
+        var starPos = new Float32Array(starCount * 3);
+        for (var s = 0; s < starCount; s++) {
+          var theta = Math.random() * Math.PI * 2;
+          var phi = Math.random() * Math.PI * 0.48;
+          var rad = 18 + Math.random() * 14;
+          starPos[s * 3] = rad * Math.sin(phi) * Math.cos(theta);
+          starPos[s * 3 + 1] = 1.5 + rad * Math.cos(phi);
+          starPos[s * 3 + 2] = rad * Math.sin(phi) * Math.sin(theta);
+        }
+        var starGeo = new THREE.BufferGeometry();
+        starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+        var starMat = new THREE.PointsMaterial({
+          map: softDotTexture,
+          color: 0xf8fafc,
+          size: 0.24,
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending
+        });
+        var starPoints = new THREE.Points(starGeo, starMat);
+        scene.add(starPoints);
+
+        // 4. Volumetric 3D Cloud Clusters
+        var cloudGroup = new THREE.Group();
+        scene.add(cloudGroup);
+        var cloudClusters = [];
+
+        for (var c = 0; c < 11; c++) {
+          var cluster = new THREE.Group();
+          var puffCount = 5 + (c % 4);
+          var sprites = [];
+          for (var p = 0; p < puffCount; p++) {
+            var spMat = new THREE.SpriteMaterial({
+              map: cloudTexture,
+              color: 0xffffff,
+              transparent: true,
+              opacity: 0.85,
+              depthWrite: false
+            });
+            var sp = new THREE.Sprite(spMat);
+            var px = (p - puffCount * 0.5) * 0.65 + (Math.random() - 0.5) * 0.35;
+            var py = (Math.random() - 0.35) * 0.45;
+            var pz = (Math.random() - 0.5) * 0.75;
+            var sc = 2.1 + Math.random() * 1.4;
+            sp.position.set(px, py, pz);
+            sp.scale.set(sc * 1.25, sc * 0.82, 1);
+            cluster.add(sp);
+            sprites.push(sp);
+          }
+          var baseX = (Math.random() - 0.5) * 14;
+          var baseY = 2.0 + Math.random() * 1.7;
+          var baseZ = (Math.random() - 0.5) * 9.5;
+          cluster.position.set(baseX, baseY, baseZ);
+          cloudGroup.add(cluster);
+          cloudClusters.push({
+            group: cluster,
+            sprites: sprites,
+            speed: 0.32 + Math.random() * 0.38,
+            bobPhase: Math.random() * Math.PI * 2
+          });
+        }
+
+        // 5. 3D Rain Streaks (LineSegments) + Surface Splash Ripples
+        var rainCount = 1350;
+        var rainPositions = new Float32Array(rainCount * 6);
+        var rainSeeds = [];
+        for (var r = 0; r < rainCount; r++) {
+          var rx = (Math.random() - 0.5) * 15;
+          var ry = -2.0 + Math.random() * 8.5;
+          var rz = (Math.random() - 0.5) * 14;
+          rainSeeds.push({
+            x: rx,
+            y: ry,
+            z: rz,
+            speed: 8.5 + Math.random() * 5.0,
+            len: 0.38 + Math.random() * 0.28
+          });
+        }
+        var rainGeo = new THREE.BufferGeometry();
+        rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPositions, 3));
+        var rainMat = new THREE.LineBasicMaterial({
+          color: 0x93c5fd,
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false
+        });
+        var rainLines = new THREE.LineSegments(rainGeo, rainMat);
+        scene.add(rainLines);
+
+        // Splash ripple pool
+        var ripples = [];
+        var rippleGeo = new THREE.RingGeometry(0.06, 0.11, 20);
+        rippleGeo.rotateX(-Math.PI / 2);
+        for (var rp = 0; rp < 28; rp++) {
+          var rpMat = new THREE.MeshBasicMaterial({
+            color: 0xbae6fd,
+            transparent: true,
+            opacity: 0,
+            side: THREE.DoubleSide,
+            depthWrite: false
+          });
+          var rpMesh = new THREE.Mesh(rippleGeo, rpMat);
+          rpMesh.position.set((Math.random() - 0.5) * 11, -2.15, (Math.random() - 0.5) * 11);
+          scene.add(rpMesh);
+          ripples.push({ mesh: rpMesh, mat: rpMat, age: Math.random() });
+        }
+
+        // 6. 3D Snow / Thar Dust Particles
+        var flakeCount = 900;
+        var flakePos = new Float32Array(flakeCount * 3);
+        var flakeSeeds = [];
+        for (var f = 0; f < flakeCount; f++) {
+          var fx = (Math.random() - 0.5) * 15;
+          var fy = -2.0 + Math.random() * 8.0;
+          var fz = (Math.random() - 0.5) * 14;
+          flakePos[f * 3] = fx;
+          flakePos[f * 3 + 1] = fy;
+          flakePos[f * 3 + 2] = fz;
+          flakeSeeds.push({
+            speed: 1.0 + Math.random() * 1.4,
+            phase: Math.random() * Math.PI * 2
+          });
+        }
+        var flakeGeo = new THREE.BufferGeometry();
+        flakeGeo.setAttribute('position', new THREE.BufferAttribute(flakePos, 3));
+        var flakeMat = new THREE.PointsMaterial({
+          map: softDotTexture,
+          color: 0xffffff,
+          size: 0.18,
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false
+        });
+        var flakePoints = new THREE.Points(flakeGeo, flakeMat);
+        scene.add(flakePoints);
+
+        // 7. 3D Lightning Bolt
+        var boltPts = [
+          new THREE.Vector3(0, 3.2, 0),
+          new THREE.Vector3(-0.4, 1.8, 0.3),
+          new THREE.Vector3(0.35, 0.7, -0.2),
+          new THREE.Vector3(-0.2, -0.8, 0.25),
+          new THREE.Vector3(0.1, -2.2, 0.0)
+        ];
+        var boltGeo = new THREE.BufferGeometry().setFromPoints(boltPts);
+        var boltMat = new THREE.LineBasicMaterial({
+          color: 0xfef08a,
+          transparent: true,
+          opacity: 0.0
+        });
+        var boltLine = new THREE.Line(boltGeo, boltMat);
+        scene.add(boltLine);
+
+        // State Variables
+        var activeState = window.__pendingWeatherState;
+        var activeRainDensity = 0;
+        var activeSnowMode = false;
+        var activeDustMode = false;
+        var activeLightning = false;
+        var lightningTimer = 0;
+
+        function computeTerrainHeight(x, z, biome, timeSec) {
+          var dist = Math.sqrt(x * x + z * z);
+          var falloff = Math.max(0, 1.0 - Math.pow(dist / 9.2, 2.2));
+          var h = 0;
+          if (biome === 'THAR_DESERT') {
+            h = (Math.sin(x * 0.55 + z * 0.22) * 0.52 + Math.cos(z * 0.48 - x * 0.18) * 0.42 + Math.sin((x + z) * 0.9) * 0.14);
+            h = (h + 0.55) * 0.85 * falloff;
+          } else if (biome === 'COASTAL' || biome === 'ISLANDS') {
+            var wave1 = Math.sin(x * 0.85 + timeSec * 1.9) * 0.14;
+            var wave2 = Math.cos(z * 0.95 - timeSec * 1.5) * 0.12;
+            h = (wave1 + wave2 + 0.1) * falloff;
+          } else if (biome === 'HIMALAYAN') {
+            var ridge1 = Math.abs(Math.sin(x * 0.45 + 0.3)) * 1.45;
+            var ridge2 = Math.abs(Math.cos(z * 0.52 - 0.4)) * 1.25;
+            var detail = Math.sin(x * 1.4) * Math.cos(z * 1.3) * 0.24;
+            h = (ridge1 + ridge2 + detail) * 0.92 * falloff;
+          } else {
+            h = (Math.sin(x * 0.42) * Math.cos(z * 0.45) * 0.55 + Math.sin((x - z) * 0.7) * 0.2 + 0.32) * falloff;
+          }
+          return h;
+        }
+
+        function updateTerrainMesh(biome, isDay, timeSec) {
+          var cAttr = terrainGeo.attributes.color;
+          for (var i = 0; i < vertexCount; i++) {
+            var x = baseXZ[i * 2];
+            var z = baseXZ[i * 2 + 1];
+            var y = computeTerrainHeight(x, z, biome, timeSec);
+            posAttr.setY(i, y);
+
+            var r = 0.2, g = 0.5, b = 0.3;
+            if (biome === 'THAR_DESERT') {
+              var crest = Math.min(1, y / 1.15);
+              if (isDay) {
+                r = 0.78 + crest * 0.20;
+                g = 0.50 + crest * 0.24;
+                b = 0.20 + crest * 0.12;
+              } else {
+                r = 0.34 + crest * 0.18;
+                g = 0.22 + crest * 0.12;
+                b = 0.12 + crest * 0.08;
+              }
+            } else if (biome === 'COASTAL' || biome === 'ISLANDS') {
+              var foam = Math.max(0, (y + 0.12) / 0.38);
+              if (isDay) {
+                r = 0.05 + foam * 0.25;
+                g = 0.38 + foam * 0.36;
+                b = 0.65 + foam * 0.30;
+              } else {
+                r = 0.03 + foam * 0.12;
+                g = 0.18 + foam * 0.20;
+                b = 0.36 + foam * 0.24;
+              }
+            } else if (biome === 'HIMALAYAN') {
+              var snow = Math.max(0, Math.min(1, (y - 0.95) / 0.85));
+              var baseR = isDay ? 0.34 : 0.18;
+              var baseG = isDay ? 0.40 : 0.22;
+              var baseB = isDay ? 0.48 : 0.30;
+              r = baseR * (1 - snow) + 0.94 * snow;
+              g = baseG * (1 - snow) + 0.96 * snow;
+              b = baseB * (1 - snow) + 1.0 * snow;
+            } else {
+              var hill = Math.min(1, y / 0.9);
+              if (isDay) {
+                r = 0.08 + hill * 0.16;
+                g = 0.42 + hill * 0.26;
+                b = 0.26 + hill * 0.14;
+              } else {
+                r = 0.05 + hill * 0.08;
+                g = 0.20 + hill * 0.12;
+                b = 0.16 + hill * 0.08;
+              }
+            }
+            cAttr.setXYZ(i, r, g, b);
+          }
+          posAttr.needsUpdate = true;
+          cAttr.needsUpdate = true;
+          terrainGeo.computeVertexNormals();
+        }
+
+        function applyWeatherState(state) {
+          activeState = state || activeState;
+          var cond = activeState.condition || 'CLEAR';
+          var isDay = activeState.isDay !== false;
+          var biome = activeState.biome || 'THAR_DESERT';
+          var cloudCover = typeof activeState.cloudCoverPercent === 'number' ? activeState.cloudCoverPercent : 25;
+
+          var isRain = cond === 'DRIZZLE' || cond === 'RAIN' || cond === 'HEAVY_RAIN' || cond === 'THUNDERSTORM';
+          var isHeavy = cond === 'HEAVY_RAIN' || cond === 'THUNDERSTORM';
+          var isCloudy = cond !== 'CLEAR';
+
+          activeSnowMode = cond === 'SNOW';
+          activeDustMode = biome === 'THAR_DESERT' && !isRain && !activeSnowMode;
+          activeLightning = cond === 'THUNDERSTORM';
+
+          activeRainDensity = cond === 'DRIZZLE' ? 0.35 : (cond === 'RAIN' ? 0.72 : (isHeavy ? 1.0 : 0.0));
+          rainMat.opacity = activeRainDensity * 0.65;
+
+          if (activeSnowMode) {
+            flakeMat.color.setHex(0xffffff);
+            flakeMat.size = 0.22;
+            flakeMat.opacity = 0.92;
+          } else if (activeDustMode) {
+            flakeMat.color.setHex(0xfcd34d);
+            flakeMat.size = 0.14;
+            flakeMat.opacity = 0.48;
+          } else {
+            flakeMat.opacity = 0.0;
+          }
+
+          // Celestial visibility
+          var showSun = isDay && (cond === 'CLEAR' || cond === 'PARTLY_CLOUDY' || cond === 'FOG_HAZE');
+          sunGroup.visible = showSun;
+          moonGroup.visible = !isDay;
+          starMat.opacity = !isDay ? (isRain ? 0.22 : 0.85) : 0.0;
+
+          // Fog & Atmosphere Colors
+          if (!isDay) {
+            fog.color.setHex(isRain ? 0x0b152a : 0x0a1633);
+            fog.density = cond === 'FOG_HAZE' ? 0.048 : 0.022;
+            hemiLight.color.setHex(0x60a5fa);
+            hemiLight.groundColor.setHex(0x0f172a);
+            hemiLight.intensity = 0.65;
+            dirLight.color.setHex(0xbfdbfe);
+            dirLight.intensity = 0.75;
+          } else if (isRain || cond === 'CLOUDY') {
+            fog.color.setHex(isHeavy ? 0x16243d : 0x1e3a5f);
+            fog.density = isHeavy ? 0.036 : 0.026;
+            hemiLight.color.setHex(0x94a3b8);
+            hemiLight.groundColor.setHex(0x1e293b);
+            hemiLight.intensity = 0.95;
+            dirLight.color.setHex(0xcbd5e1);
+            dirLight.intensity = 0.85;
+          } else if (cond === 'FOG_HAZE') {
+            fog.color.setHex(0x475569);
+            fog.density = 0.055;
+            hemiLight.color.setHex(0xe2e8f0);
+            hemiLight.intensity = 1.0;
+            dirLight.color.setHex(0xfde68a);
+            dirLight.intensity = 1.05;
+          } else {
+            fog.color.setHex(biome === 'THAR_DESERT' ? 0x2b4162 : 0x124278);
+            fog.density = 0.016;
+            hemiLight.color.setHex(0xbae6fd);
+            hemiLight.groundColor.setHex(biome === 'THAR_DESERT' ? 0x92400e : 0x0f3b2e);
+            hemiLight.intensity = 1.15;
+            dirLight.color.setHex(0xfff4d6);
+            dirLight.intensity = 1.95;
+          }
+
+          // Cloud Cluster Visibility & Shading
+          var desiredClouds = 0;
+          if (cond === 'CLEAR') {
+            desiredClouds = cloudCover > 15 ? 2 : 0;
+          } else if (cond === 'PARTLY_CLOUDY') {
+            desiredClouds = 5;
+          } else {
+            desiredClouds = cloudClusters.length;
+          }
+
+          var cloudTint = (isRain || cond === 'THUNDERSTORM')
+            ? (isHeavy ? 0x475569 : 0x64748b)
+            : (isDay ? 0xffffff : 0x94a3b8);
+          var cloudAlpha = cond === 'FOG_HAZE' ? 0.58 : (isCloudy ? 0.88 : 0.45);
+
+          for (var c = 0; c < cloudClusters.length; c++) {
+            var cl = cloudClusters[c];
+            cl.group.visible = c < desiredClouds;
+            for (var sp = 0; sp < cl.sprites.length; sp++) {
+              cl.sprites[sp].material.color.setHex(cloudTint);
+              cl.sprites[sp].material.opacity = cloudAlpha;
+            }
+          }
+
+          updateTerrainMesh(biome, isDay, 0);
+        }
+
+        window.__applyWeatherToThreeScene = applyWeatherState;
+        applyWeatherState(activeState);
+
+        // Touch / Mouse Drag Orbit + Double Tap Reset
+        var isDragging = false;
+        var lastX = 0;
+        var lastY = 0;
+        var lastTapTime = 0;
+
+        function onPointerDown(x, y) {
+          isDragging = true;
+          lastX = x;
+          lastY = y;
+          var now = Date.now();
+          if (now - lastTapTime < 280) {
+            targetYaw = 0.42;
+            targetPitch = 0.34;
+          }
+          lastTapTime = now;
+        }
+
+        function onPointerMove(x, y) {
+          if (!isDragging) return;
+          var dx = x - lastX;
+          var dy = y - lastY;
+          lastX = x;
+          lastY = y;
+          targetYaw += dx * 0.0085;
+          targetPitch = Math.max(0.10, Math.min(1.12, targetPitch + dy * 0.0065));
+        }
+
+        function onPointerUp() {
+          isDragging = false;
+        }
+
+        var dom = renderer.domElement;
+        dom.addEventListener('touchstart', function (e) {
+          if (e.touches.length > 0) {
+            onPointerDown(e.touches[0].clientX, e.touches[0].clientY);
+          }
+        }, { passive: true });
+        dom.addEventListener('touchmove', function (e) {
+          if (e.touches.length > 0) {
+            onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
+          }
+        }, { passive: true });
+        dom.addEventListener('touchend', onPointerUp, { passive: true });
+        dom.addEventListener('mousedown', function (e) { onPointerDown(e.clientX, e.clientY); });
+        window.addEventListener('mousemove', function (e) { onPointerMove(e.clientX, e.clientY); });
+        window.addEventListener('mouseup', onPointerUp);
+
+        window.addEventListener('resize', function () {
+          var nw = Math.max(container.clientWidth, 300);
+          var nh = Math.max(container.clientHeight, 220);
+          camera.aspect = nw / nh;
+          camera.updateProjectionMatrix();
+          renderer.setSize(nw, nh);
+        });
+
+        var clock = new THREE.Clock();
+        var frameCount = 0;
+
+        function animate() {
+          requestAnimationFrame(animate);
+          var dt = Math.min(clock.getDelta(), 0.05);
+          var elapsed = clock.getElapsedTime();
+
+          // Smooth camera orbit + subtle ambient drift
+          if (!isDragging) {
+            targetYaw += dt * 0.06;
+          }
+          currentYaw += (targetYaw - currentYaw) * Math.min(1, dt * 7.5);
+          currentPitch += (targetPitch - currentPitch) * Math.min(1, dt * 7.5);
+
+          camera.position.x = Math.sin(currentYaw) * Math.cos(currentPitch) * camDistance;
+          camera.position.y = Math.sin(currentPitch) * camDistance + 0.6;
+          camera.position.z = Math.cos(currentYaw) * Math.cos(currentPitch) * camDistance;
+          camera.lookAt(0, 0.25, 0);
+
+          // Animate Ocean Waves dynamically if coastal/islands
+          var biome = activeState.biome || 'THAR_DESERT';
+          if (biome === 'COASTAL' || biome === 'ISLANDS') {
+            updateTerrainMesh(biome, activeState.isDay !== false, elapsed);
+          }
+
+          // Sun corona pulse
+          if (sunGroup.visible) {
+            var pulse = 1.0 + Math.sin(elapsed * 2.2) * 0.07;
+            sunHalo1.scale.set(5.2 * pulse, 5.2 * pulse, 1);
+            sunHalo2.scale.set(8.5 * (2 - pulse * 0.95), 8.5 * (2 - pulse * 0.95), 1);
+          }
+
+          // Drift volumetric clouds proportional to live windSpeedKmh
+          var windSpeed = Math.max(4, activeState.windSpeedKmh || 10);
+          var windFactor = Math.min(3.0, windSpeed / 12.0);
+          for (var c = 0; c < cloudClusters.length; c++) {
+            var cl = cloudClusters[c];
+            if (!cl.group.visible) continue;
+            cl.group.position.x += cl.speed * windFactor * dt;
+            cl.group.position.y += Math.sin(elapsed * 0.9 + cl.bobPhase) * 0.0018;
+            if (cl.group.position.x > 9.5) {
+              cl.group.position.x = -9.5;
+            }
+          }
+
+          // Update 3D Rain streaks & surface splashes
+          if (activeRainDensity > 0) {
+            var slant = Math.min(0.32, (windSpeed / 40.0) * 0.24);
+            var activeCount = Math.floor(rainCount * activeRainDensity);
+            var arr = rainGeo.attributes.position.array;
+            for (var r = 0; r < rainCount; r++) {
+              var idx = r * 6;
+              if (r >= activeCount) {
+                arr[idx] = arr[idx + 1] = arr[idx + 2] = 9999;
+                arr[idx + 3] = arr[idx + 4] = arr[idx + 5] = 9999;
+                continue;
+              }
+              var seed = rainSeeds[r];
+              seed.y -= seed.speed * dt;
+              seed.x += slant * seed.speed * dt;
+              if (seed.y < -2.1) {
+                seed.y = 5.2 + Math.random() * 1.5;
+                seed.x = (Math.random() - 0.5) * 15;
+              }
+              arr[idx] = seed.x;
+              arr[idx + 1] = seed.y;
+              arr[idx + 2] = seed.z;
+              arr[idx + 3] = seed.x - slant * seed.len;
+              arr[idx + 4] = seed.y + seed.len;
+              arr[idx + 5] = seed.z;
+            }
+            rainGeo.attributes.position.needsUpdate = true;
+
+            for (var rp = 0; rp < ripples.length; rp++) {
+              var rip = ripples[rp];
+              rip.age += dt * (1.5 + activeRainDensity);
+              if (rip.age >= 1.0) {
+                rip.age = 0;
+                rip.mesh.position.set((Math.random() - 0.5) * 11, -2.08, (Math.random() - 0.5) * 11);
+              }
+              var sc = 0.4 + rip.age * 2.8;
+              rip.mesh.scale.set(sc, sc, 1);
+              rip.mat.opacity = (1.0 - rip.age) * 0.45 * activeRainDensity;
+            }
+          } else {
+            for (var rp2 = 0; rp2 < ripples.length; rp2++) {
+              ripples[rp2].mat.opacity = 0;
+            }
+          }
+
+          // Update 3D Snow or Thar Dust
+          if (activeSnowMode || activeDustMode) {
+            var fArr = flakeGeo.attributes.position.array;
+            for (var f = 0; f < flakeCount; f++) {
+              var fs = flakeSeeds[f];
+              var fi = f * 3;
+              if (activeSnowMode) {
+                fArr[fi + 1] -= fs.speed * dt;
+                fArr[fi] += Math.sin(elapsed * 1.6 + fs.phase) * 0.45 * dt + windFactor * 0.25 * dt;
+                if (fArr[fi + 1] < -2.1) {
+                  fArr[fi + 1] = 5.4;
+                  fArr[fi] = (Math.random() - 0.5) * 15;
+                }
+              } else {
+                fArr[fi] += fs.speed * windFactor * 0.95 * dt;
+                fArr[fi + 1] += Math.sin(elapsed * 2.2 + fs.phase) * 0.28 * dt;
+                if (fArr[fi] > 7.5) {
+                  fArr[fi] = -7.5;
+                  fArr[fi + 1] = -1.6 + Math.random() * 4.5;
+                }
+              }
+            }
+            flakeGeo.attributes.position.needsUpdate = true;
+          }
+
+          // Update 3D Lightning Flash
+          if (activeLightning) {
+            lightningTimer -= dt;
+            if (lightningTimer <= 0) {
+              lightningTimer = 2.0 + Math.random() * 3.5;
+              var bx = (Math.random() - 0.5) * 6;
+              var bz = (Math.random() - 0.5) * 6;
+              var bAttr = boltGeo.attributes.position;
+              bAttr.setXYZ(0, bx, 3.1, bz);
+              bAttr.setXYZ(1, bx + (Math.random() - 0.5) * 1.2, 1.7, bz + 0.3);
+              bAttr.setXYZ(2, bx + (Math.random() - 0.5) * 1.2, 0.5, bz - 0.2);
+              bAttr.setXYZ(3, bx + (Math.random() - 0.5) * 1.0, -0.8, bz + 0.2);
+              bAttr.setXYZ(4, bx, -2.1, bz);
+              bAttr.needsUpdate = true;
+              lightningLight.position.set(bx, 2.5, bz);
+              lightningLight.intensity = 9.0;
+              boltMat.opacity = 1.0;
+            }
+            lightningLight.intensity *= Math.pow(0.04, dt);
+            boltMat.opacity *= Math.pow(0.02, dt);
+          } else {
+            lightningLight.intensity = 0;
+            boltMat.opacity = 0;
+          }
+
+          // Star twinkle
+          if (starMat.opacity > 0.05) {
+            starPoints.rotation.y += dt * 0.015;
+          }
+
+          renderer.render(scene, camera);
+          frameCount++;
+          if (frameCount === 2) {
+            notifyReady();
+          }
+        }
+
+        animate();
+      }
+
+      loadScript(
+        'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.min.js',
+        bootThreeScene,
+        function () {
+          loadScript(
+            'https://unpkg.com/three@0.169.0/build/three.min.js',
+            bootThreeScene,
+            function () {
+              notifyFallback('Three.js CDN unreachable');
+            }
+          );
+        }
+      );
+    })();
+  </script>
+</body>
+</html>

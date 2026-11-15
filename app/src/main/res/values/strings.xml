@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Mausam 3D</string>
+    <string name="nav_sky_3d">Sky 3D</string>
+    <string name="nav_india_3d">India 3D</string>
+    <string name="nav_saved">Cities</string>
+    <string name="drag_to_orbit_hint">Drag to tilt 3D · Double-tap to reset</string>
+    <string name="search_india_hint">Search any city or state in India...</string>
+    <string name="refresh_weather">Refresh weather</string>
+    <string name="toggle_pin_city">Toggle pinned city</string>
+    <string name="unit_celsius">°C</string>
+    <string name="unit_fahrenheit">°F</string>
+    <string name="retry">Retry</string>
+    <string name="loading_weather">Syncing live atmosphere…</string>
+    <string name="search_city_icon_desc">Search Indian city</string>
+    <string name="clear_search">Clear search</string>
+    <string name="searching_india_cities">Searching India for \"%1$s\"…</string>
+    <string name="no_india_city_match">No Indian city found for \"%1$s\"</string>
+    <string name="fetch_weather_chip">Load</string>
+</resources>

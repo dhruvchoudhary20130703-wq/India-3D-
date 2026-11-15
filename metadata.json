@@ -1,0 +1,6 @@
+{
+  "name": "Mausam 3D",
+  "description": "Interactive 3D weather app for all Indian states and union territories, spotlighting Jodhpur, Barmer, Mumbai, and 150+ cities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
